@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>チキンレース</title>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --board:#F2D75B; --ink:#1E1E24; --hole:#2B3A67; --goal:#3FA34D;
+    --paper:#FBF3D0; --danger:#E4572E;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--ink);color:var(--paper);font-family:Fredoka,"Hiragino Kaku Gothic ProN","Noto Sans JP",sans-serif;
+       display:flex;flex-direction:column;align-items:center;min-height:100vh;user-select:none;-webkit-user-select:none}
+  header{width:min(96vw,720px);display:flex;justify-content:space-between;align-items:baseline;padding:14px 4px 6px}
+  h1{margin:0;font-size:26px;font-weight:700;letter-spacing:.02em}
+  .stat{font-size:16px;opacity:.85}
+  canvas{width:min(96vw,720px);aspect-ratio:720/420;background:var(--board);border-radius:10px;display:block;touch-action:manipulation}
+  .panel{width:min(96vw,720px);display:grid;grid-template-columns:1fr auto auto;gap:14px;align-items:center;padding:12px 0}
+  .meter{height:38px;border-radius:19px;background:#2f2f38;position:relative;overflow:hidden;border:3px solid #444}
+  .meter .fill{position:absolute;inset:0;width:0;background:linear-gradient(90deg,#3FA34D,#F2D75B 55%,#E4572E);transition:none}
+  .meter .label{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-weight:700;font-size:17px;color:#fff;text-shadow:0 1px 2px #0008}
+  button{font:inherit;font-weight:700;font-size:20px;padding:0 28px;height:44px;border:0;border-radius:22px;background:var(--paper);color:var(--ink);cursor:pointer}
+  button:active{transform:translateY(2px)}
+  button.sub{background:transparent;color:var(--paper);border:2px solid #666;font-size:15px;padding:0 16px}
+  button:focus-visible{outline:3px solid #fff}
+  .hint{font-size:14px;opacity:.7;padding-bottom:20px;text-align:center}
+</style>
+</head>
+<body>
+<header>
+  <h1>チキンレース</h1>
+  <div class="stat"><span id="lv">ステージ 1</span> / <span id="turn">0手</span> / <span id="tot">合計0手</span></div>
+</header>
+<canvas id="c" width="720" height="420"></canvas>
+<div class="panel">
+  <div class="meter"><div class="fill" id="fill"></div><div class="label" id="lab">タップして開始</div></div>
+  <button id="btn">ストップ</button>
+  <button id="rst" class="sub">ステージを作り直す</button>
+</div>
+<div class="hint">画面か「ストップ」ボタン、またはスペースキーで目押し。壁は一瞬でも触れたらアウト。穴や場外は体の半分以上が出るまでは落ちません。ゴールの輪の中でぴったり止まればクリア（通過するだけではダメ）。</div>
+
+<script>
+const W=720,H=420,R=14,FRIC=0.96;
+const cv=document.getElementById('c'),ctx=cv.getContext('2d');
+const fill=document.getElementById('fill'),lab=document.getElementById('lab'),btn=document.getElementById('btn');
+const lvEl=document.getElementById('lv'),turnEl=document.getElementById('turn');
+
+// ランダム配置: 壁2〜3枚 + 穴3〜4個。スタート/ゴール周辺には置かない
+const ROUNDS=5;
+const rnd=(a,b)=>a+Math.random()*(b-a);
+function makeLevel(){
+  const start=[70,rnd(60,H-60)],goal=[650,rnd(60,H-60),40];
+  const walls=[],holes=[];
+  const clearOf=(cx,cy,r)=>Math.hypot(cx-start[0],cy-start[1])>r+60&&Math.hypot(cx-goal[0],cy-goal[1])>r+70;
+  const noOverlap=(cx,cy,r)=>holes.every(h=>Math.hypot(cx-h[0],cy-h[1])>r+h[2]+20)
+    &&walls.every(w=>!circleRect(cx,cy,r+20,w));
+  const nW=2+Math.floor(Math.random()*2),nH=3+Math.floor(Math.random()*2);
+  for(let i=0,tries=0;i<nW&&tries<200;tries++){
+    const vert=Math.random()<0.6,len=rnd(90,180),th=32;
+    const w=vert?[rnd(170,520),rnd(20,H-20-len),th,len]:[rnd(170,520-len),rnd(40,H-40),len,th];
+    const cx=w[0]+w[2]/2,cy=w[1]+w[3]/2,r=Math.max(w[2],w[3])/2;
+    if(clearOf(cx,cy,r)&&walls.every(o=>!(w[0]<o[0]+o[2]+50&&o[0]<w[0]+w[2]+50&&w[1]<o[1]+o[3]+50&&o[1]<w[1]+w[3]+50))){walls.push(w);i++;}
+  }
+  for(let i=0,tries=0;i<nH&&tries<200;tries++){
+    const r=rnd(22,40),cx=rnd(140+r,600-r),cy=rnd(r+10,H-r-10);
+    if(clearOf(cx,cy,r)&&noOverlap(cx,cy,r)){holes.push([cx,cy,r]);i++;}
+  }
+  return {start,goal,walls,holes};
+}
+let LEVELS=[],total=0;
+function newGame(){LEVELS=Array.from({length:ROUNDS},makeLevel);level=0;total=0;}
+
+let level=0,turn=0,phase='idle';  // idle | power | aim | move | fail | clear
+let x,y,vx,vy,power=0,angle=0,t0=0,msg='';
+const p=lv=>LEVELS[lv];
+let done=false;
+
+function reset(full){
+  const L=p(level); [x,y]=L.start; vx=vy=0;
+  if(full)turn=0;
+  phase='idle'; msg=''; lab.textContent='タップして開始'; fill.style.width='0';
+  lvEl.textContent=`ステージ ${level+1}/${ROUNDS}`; turnEl.textContent=`${turn}手`;document.getElementById('tot').textContent=`合計${total}手`;
+}
+
+function act(){
+  const now=performance.now();
+  if(phase==='idle'){phase='power';t0=now;lab.textContent='パワーを止める';}
+  else if(phase==='power'){power=powerAt(now);phase='aim';t0=now;lab.textContent='方向を止める';}
+  else if(phase==='aim'){angle=angleAt(now);turn++;turnEl.textContent=`${turn}手`;
+    const v=0.6+power*18; vx=Math.cos(angle)*v; vy=Math.sin(angle)*v; phase='move';lab.textContent='…';}
+  else if(phase==='fail'){reset(false);}
+  else if(phase==='clear'){
+    if(level+1<ROUNDS){level++;reset(true);}
+    else{newGame();done=false;reset(true);}
+  }
+}
+const powerAt=n=>{const s=((n-t0)/900)%2;return s<1?s:2-s;};        // 三角波 0→1→0
+const angleAt=n=>((n-t0)/1600)*Math.PI*2;                            // 1.6秒で一周
+
+btn.addEventListener('click',act);
+document.getElementById('rst').addEventListener('click',()=>{if(phase!=='clear'){LEVELS[level]=makeLevel();reset(true);}});
+cv.addEventListener('pointerdown',e=>{e.preventDefault();act();});
+addEventListener('keydown',e=>{if(e.code==='Space'){e.preventDefault();act();}});
+
+function circleRect(cx,cy,r,[rx,ry,rw,rh]){
+  const nx=Math.max(rx,Math.min(cx,rx+rw)),ny=Math.max(ry,Math.min(cy,ry+rh));
+  return (cx-nx)**2+(cy-ny)**2<r*r;
+}
+function step(){
+  const L=p(level);
+  x+=vx;y+=vy;vx*=FRIC;vy*=FRIC;
+  if(x<0||x>W||y<0||y>H){return fail('場外に落ちた！');}   // 中心が外に出た＝半分以上はみ出したら落下
+  for(const h of L.holes)if(Math.hypot(x-h[0],y-h[1])<h[2])return fail('穴に落ちた！');   // 中心が穴に入った＝半分以上乗ったら落下
+  for(const w of L.walls)if(w[2]&&circleRect(x,y,R,w))return fail('壁にぶつかった！');
+  if(Math.hypot(vx,vy)<0.2){
+    vx=vy=0;
+    const g=L.goal;
+    if(Math.hypot(x-g[0],y-g[1])<=g[2]-R){   // 止まった位置がゴールの輪に完全に収まっていればクリア
+      phase='clear';total+=turn;
+      if(level+1<ROUNDS){msg=`ゴール！ ${turn}手`;lab.textContent='次のステージへ';}
+      else{done=true;msg=`全5ステージ制覇！ 合計 ${total}手`;lab.textContent='もう一度あそぶ';}
+      fill.style.width='100%';return;
+    }
+    phase='idle';lab.textContent='タップして次の一手';
+  }
+}
+function fail(m){phase='fail';msg=m;lab.textContent='タップしてやり直し';fill.style.width='0';}
+
+function draw(now){
+  const L=p(level);
+  if(phase==='move')step();
+  if(phase==='power'){fill.style.width=(powerAt(now)*100)+'%';}
+
+  ctx.clearRect(0,0,W,H);
+  // 罫線
+  ctx.strokeStyle='#e5c84a';ctx.lineWidth=1;
+  for(let i=60;i<W;i+=60){ctx.beginPath();ctx.moveTo(i,0);ctx.lineTo(i,H);ctx.stroke();}
+  for(let i=60;i<H;i+=60){ctx.beginPath();ctx.moveTo(0,i);ctx.lineTo(W,i);ctx.stroke();}
+  // スタート
+  ctx.fillStyle='#e0c142';ctx.beginPath();ctx.arc(L.start[0],L.start[1],26,0,7);ctx.fill();
+  // ゴール
+  const g=L.goal;ctx.fillStyle='rgba(63,163,77,.18)';ctx.beginPath();ctx.arc(g[0],g[1],g[2],0,7);ctx.fill();ctx.lineWidth=6;ctx.strokeStyle='#3FA34D';ctx.beginPath();ctx.arc(g[0],g[1],g[2],0,7);ctx.stroke();
+  ctx.fillStyle='#3FA34D';ctx.font='700 16px Fredoka,sans-serif';ctx.textAlign='center';ctx.fillText('GOAL',g[0],g[1]+6);
+  // 穴
+  for(const h of L.holes){ctx.fillStyle='#2B3A67';ctx.beginPath();ctx.arc(h[0],h[1],h[2],0,7);ctx.fill();
+    ctx.fillStyle='#1b2547';ctx.beginPath();ctx.arc(h[0],h[1],h[2]*0.6,0,7);ctx.fill();}
+  // 壁
+  ctx.fillStyle='#1E1E24';for(const w of L.walls)if(w[2])ctx.fillRect(...w);
+  // 方向ガイド
+  if(phase==='aim'){const a=angleAt(now),len=40+power*120;
+    ctx.strokeStyle='#E4572E';ctx.lineWidth=5;ctx.lineCap='round';
+    ctx.beginPath();ctx.moveTo(x,y);ctx.lineTo(x+Math.cos(a)*len,y+Math.sin(a)*len);ctx.stroke();
+    ctx.fillStyle='#E4572E';ctx.beginPath();ctx.arc(x+Math.cos(a)*len,y+Math.sin(a)*len,7,0,7);ctx.fill();}
+  // プレイヤー（ひよこ）
+  ctx.fillStyle=phase==='fail'?'#E4572E':'#fff';ctx.strokeStyle='#1E1E24';ctx.lineWidth=3;
+  ctx.beginPath();ctx.arc(x,y,R,0,7);ctx.fill();ctx.stroke();
+  ctx.fillStyle='#1E1E24';ctx.beginPath();ctx.arc(x+4,y-4,2.5,0,7);ctx.fill();
+  ctx.fillStyle='#E4572E';ctx.beginPath();ctx.moveTo(x+9,y+1);ctx.lineTo(x+18,y+4);ctx.lineTo(x+9,y+7);ctx.fill();
+  // メッセージ
+  if(msg){ctx.fillStyle='rgba(30,30,36,.85)';ctx.fillRect(0,H/2-34,W,68);
+    ctx.fillStyle=phase==='clear'?'#F2D75B':'#fff';ctx.font='700 30px Fredoka,sans-serif';ctx.textAlign='center';ctx.fillText(msg,W/2,H/2+11);}
+  requestAnimationFrame(draw);
+}
+newGame();reset(true);requestAnimationFrame(draw);
+</script>
+</body>
+</html>
